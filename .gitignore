@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# EasyOCR model cache
+.EasyOCR/
+
+# macOS
+.DS_Store
+
+# Runtime output
+data/results.txt
+
+# Virtual environment
+venv/
+.venv/
+env/
