@@ -27,10 +27,6 @@ except ImportError:
     WATCHDOG_AVAILABLE = False
 
 
-# ---------------------------------------------------------------------------
-#  Configuration
-# ---------------------------------------------------------------------------
-
 BASE_DIR = Path(__file__).resolve().parent
 PLATES_DIR = BASE_DIR / "plates"
 PROCESSED_DIR = BASE_DIR / "processed"
@@ -47,17 +43,8 @@ logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=DATE_FORMAT)
 logger = logging.getLogger("CarPlateSystem")
 
 
-# ---------------------------------------------------------------------------
-#  Plate format definitions
-# ---------------------------------------------------------------------------
-#
-#  L = letter slot, D = digit slot. Each layout is checked end-to-end against
-#  candidate texts; mismatched characters are corrected via the confusion maps
-#  below before the final regex pattern check.
-# ---------------------------------------------------------------------------
-
+# L = letter, D = digit. we check the text with this
 PLATE_LAYOUTS = [
-    # (type_name, layout, final_pattern, extra_constraint)
     ("KKTC_OLD",        list("LLDDD"),    re.compile(r"^[A-Z]{2}\d{3}$"),         None),
     ("KKTC_NEW",        list("LLDDDL"),   re.compile(r"^[A-Z]{2}\d{3}[A-Z]$"),    None),
     ("KKTC_RENTAL_OLD", list("LLLDDD"),   re.compile(r"^[A-Z]{3}\d{3}$"),         None),
@@ -70,16 +57,10 @@ PLATE_LAYOUTS = [
     ("TR_NEW_4",        list("DDLLLDDD"), re.compile(r"^\d{2}[A-Z]{3}\d{3}$"),    None),
 ]
 
-# Two-tier region preference: any KKTC layout outranks any TR layout. The user
-# of this system is in TRNC, so a TR-pattern candidate should never beat a
-# valid KKTC reading even if the TR text happens to be longer.
+# we are in kktc so kktc plates more important than tr ones
 KKTC_TYPES = {"KKTC_OLD", "KKTC_NEW", "KKTC_RENTAL_OLD", "KKTC_RENTAL_NEW"}
 
-# When two narrow letters touch in stylised plate fonts, EasyOCR sometimes
-# reads the joined glyph as a single wide character. Each expansion is a list
-# of (substitute, prior_bonus) — the bonus reflects how common that two-letter
-# combination is in KKTC plates relative to the others. These are applied as
-# additional candidates, never as overrides.
+# sometimes ocr read 2 letters as 1 wide letter. we try other options too
 WIDE_LETTER_EXPANSIONS = {
     "W": [("UD", 0.10), ("VV", 0.04), ("UU", 0.02),
           ("II", 0.0),  ("VY", 0.0),  ("YV", 0.0)],
@@ -88,7 +69,7 @@ WIDE_LETTER_EXPANSIONS = {
     "N": [("II", 0.0),  ("IN", 0.0),  ("NI", 0.0)],
 }
 
-# Common OCR confusions when a letter is read in a digit slot (and vice versa).
+# letters that look like digits and digits that look like letters
 LETTER_TO_DIGIT = {
     "O": "0", "Q": "0", "D": "0", "U": "0",
     "I": "1", "L": "1", "J": "1",
@@ -104,15 +85,9 @@ DIGIT_TO_LETTER = {
     "5": "S", "6": "G", "7": "T", "8": "B",
 }
 
-# Format priority (lower index = higher priority). Used as a tiebreaker so that
-# longer matches beat shorter ones — preventing "AA172M" from being trimmed to
-# "AA172" because the latter happens to be a valid KKTC_OLD.
+# longer match is better, this stop "AA172M" become "AA172"
 FORMAT_PRIORITY = {name: i for i, (name, *_rest) in enumerate(reversed(PLATE_LAYOUTS))}
 
-
-# ---------------------------------------------------------------------------
-#  1. Image preprocessing — generate multiple variants
-# ---------------------------------------------------------------------------
 
 class ImagePreprocessor:
     TARGET_WIDTH = 1600
@@ -131,7 +106,6 @@ class ImagePreprocessor:
         return image
 
     def variants(self, image: np.ndarray) -> list:
-        """Returns a list of (name, image) preprocessing variants."""
         h, w = image.shape[:2]
         if w < self.TARGET_WIDTH:
             scale = self.TARGET_WIDTH / w
@@ -153,10 +127,6 @@ class ImagePreprocessor:
         ]
 
 
-# ---------------------------------------------------------------------------
-#  2. OCR engine — collect detections from every variant
-# ---------------------------------------------------------------------------
-
 class PlateOCR:
     def __init__(self):
         logger.info("Loading OCR engine (this can take a moment on first run)...")
@@ -164,11 +134,7 @@ class PlateOCR:
         logger.info("OCR engine ready.")
 
     def detect_all(self, variants: list) -> list:
-        """Run OCR on every variant. Returns list of detection dicts containing
-        text, confidence, bounding box and source variant name. Allowlist and
-        free-text passes are deduplicated when they produce identical readings.
-        """
-        seen = {}                              # key -> detection
+        seen = {}
         for name, img in variants:
             for use_allow in (True, False):
                 kwargs = {"detail": 1, "paragraph": False}
@@ -199,24 +165,7 @@ class PlateOCR:
         return list(seen.values())
 
 
-# ---------------------------------------------------------------------------
-#  2b. Visual Y/V/U disambiguator
-# ---------------------------------------------------------------------------
-#
-#  KKTC plate fonts often render Y with such a short bottom stem that EasyOCR
-#  reads it as V (and vice versa for some U/V cases). We disambiguate by
-#  cropping each suspect character cell from a clean grayscale image and
-#  measuring the longest contiguous vertical run in the central columns.
-#
-#    - Y has a strong vertical stem reaching at least ~half of the char height
-#    - V tapers to a point: no long central run
-#    - U has empty middle except for the rounded base: short central run
-# ---------------------------------------------------------------------------
-
 def _isolate_character(char_bin: np.ndarray) -> np.ndarray:
-    """Pick the most central, character-sized connected component out of the
-    binary cell. This strips plate-frame noise bands and side-letter bleed.
-    """
     n, labels, stats, _ = cv2.connectedComponentsWithStats(char_bin, connectivity=8)
     if n < 2:
         return char_bin
@@ -225,9 +174,9 @@ def _isolate_character(char_bin: np.ndarray) -> np.ndarray:
     for i in range(1, n):
         x, y, w_c, h_c, area = stats[i]
         if h_c < h * 0.40 or area < 30:
-            continue                       # too short or too small
+            continue
         if w_c >= w * 0.95 and h_c <= h * 0.25:
-            continue                       # horizontal noise band
+            continue
         cx = x + w_c / 2.0
         center_dist = abs(cx - w / 2.0) / max(w, 1)
         score = area * (1.0 - min(center_dist, 1.0))
@@ -242,7 +191,6 @@ def _isolate_character(char_bin: np.ndarray) -> np.ndarray:
 
 
 def _count_horizontal_runs(row: np.ndarray) -> int:
-    """Number of contiguous foreground runs in a single row."""
     runs = 0
     in_run = False
     for px in row:
@@ -256,12 +204,7 @@ def _count_horizontal_runs(row: np.ndarray) -> int:
 
 
 def _stroke_merge_y_ratio(char_bin: np.ndarray) -> float:
-    """Find where the two diagonal strokes of V/Y merge into a single stroke.
-    Returns the relative y position (0=top, 1=bottom).
-
-      - Y merges in the upper-middle (~0.45-0.55): the fork joins above the stem
-      - V merges only near the bottom (~0.75-0.90): the diagonals converge to a tip
-    """
+    # Y merges high, V merges low. we look where 2 lines become 1
     iso = _isolate_character(char_bin)
     h, _ = iso.shape
     if h < 8:
@@ -279,10 +222,6 @@ def _stroke_merge_y_ratio(char_bin: np.ndarray) -> float:
 
 
 def disambiguate_letters(detection: dict, gray_image: np.ndarray) -> str:
-    """Return the detection text with V/Y characters corrected based on the
-    vertical-stem test. The image is the same-resolution grayscale variant
-    used during OCR, so the bbox is directly usable.
-    """
     text = detection["text"]
     if not any(c in text for c in "VY"):
         return text
@@ -310,24 +249,16 @@ def disambiguate_letters(detection: dict, gray_image: np.ndarray) -> str:
             continue
         _, cell_bin = cv2.threshold(cell, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         merge_y = _stroke_merge_y_ratio(cell_bin)
-        # Y's fork merges into the stem in the upper-middle of the character.
         if merge_y < 0.65:
             out.append("Y")
-        # V's diagonals only meet near the bottom of the character.
         elif merge_y > 0.72:
             out.append("V")
         else:
-            out.append(ch)  # ambiguous → trust OCR
+            out.append(ch)
     return "".join(out)
 
 
-# ---------------------------------------------------------------------------
-#  3. Candidate construction (handles single + multi-line plates)
-# ---------------------------------------------------------------------------
-
 def _expand_wide_letters(text: str) -> list:
-    """Generate (variant, prior_bonus) tuples by replacing wide-letter glyphs
-    with their plausible two-letter substitutes."""
     variants = []
     for i, ch in enumerate(text):
         if ch in WIDE_LETTER_EXPANSIONS:
@@ -337,21 +268,12 @@ def _expand_wide_letters(text: str) -> list:
 
 
 def build_candidates(detections: list, gray_image: np.ndarray = None) -> list:
-    """Build candidate (text, conf) pairs.
-
-    Each individual detection is a candidate. Additionally, vertically-stacked
-    detections from the same variant are concatenated to recover two-line
-    plates (e.g. "AA" / "583Z"). When a clean grayscale image is provided,
-    each detection also yields a Y/V-disambiguated variant.
-    """
-    cands = []  # list of (text, conf, bonus)
+    cands = []
     for det in detections:
         cands.append((det["text"], det["conf"], 0.0))
         if gray_image is not None:
             corrected = disambiguate_letters(det, gray_image)
             if corrected != det["text"]:
-                # Disambiguator overrode V/Y — give it a small advantage so it
-                # wins ties against the raw OCR reading.
                 cands.append((corrected, det["conf"], 0.15))
 
     by_source = {}
@@ -359,7 +281,7 @@ def build_candidates(detections: list, gray_image: np.ndarray = None) -> list:
         by_source.setdefault(det["source"], []).append(det)
 
     for source_dets in by_source.values():
-        # ----- vertical stacking (two-line plates) -----
+        # try to join 2 lines plates like "AA" + "583Z"
         ordered_y = sorted(source_dets, key=lambda d: d["bbox"][1])
         n = len(ordered_y)
         for span in (2, 3):
@@ -382,11 +304,6 @@ def build_candidates(detections: list, gray_image: np.ndarray = None) -> list:
                     if corrected != text:
                         cands.append((corrected, conf, 0.15))
 
-        # ----- horizontal concatenation of same-row fragments -----
-        # When OCR splits a plate ("U" + "736"), join detections that share a
-        # vertical band, ordered left-to-right. Only join fragments with
-        # similar heights and minimal X overlap so that nested mis-detections
-        # ("VI" inside "V360") are not stitched together.
         def _compatible(a, b):
             ax0, ay0, ax1, ay1 = a["bbox"]
             bx0, by0, bx1, by1 = b["bbox"]
@@ -396,16 +313,17 @@ def build_candidates(detections: list, gray_image: np.ndarray = None) -> list:
             bw = bx1 - bx0
             if ah <= 0 or bh <= 0 or aw <= 0 or bw <= 0:
                 return False
-            if min(ah, bh) / max(ah, bh) < 0.6:           # heights too different
+            if min(ah, bh) / max(ah, bh) < 0.6:
                 return False
             y_ov = min(ay1, by1) - max(ay0, by0)
-            if y_ov < min(ah, bh) * 0.5:                  # not on same row
+            if y_ov < min(ah, bh) * 0.5:
                 return False
             x_ov = min(ax1, bx1) - max(ax0, bx0)
-            if x_ov > min(aw, bw) * 0.30:                 # too much X overlap
+            if x_ov > min(aw, bw) * 0.30:
                 return False
             return True
 
+        # join pieces on same row left to right (like "U" + "736")
         rows = []
         for det in sorted(source_dets, key=lambda d: d["bbox"][0]):
             placed = False
@@ -427,26 +345,18 @@ def build_candidates(detections: list, gray_image: np.ndarray = None) -> list:
                 if corrected != text:
                     cands.append((corrected, conf, 0.15))
 
-    # Wide-letter expansion: add W/M/N → 2-letter alternates as extra candidates.
     extra = []
     for raw, conf, bonus in cands:
         if any(c in raw for c in WIDE_LETTER_EXPANSIONS):
             for variant, sub_bonus in _expand_wide_letters(raw):
-                # Penalise expansions so they only win when the original OCR
-                # candidate fails to validate; the prior bonus then breaks ties
-                # between mutually-valid expansions (UD beats VV beats UU…).
+                # we make them little weaker, only win if original fail
                 extra.append((variant, conf * 0.85, bonus + sub_bonus))
     cands.extend(extra)
     return cands
 
 
-# ---------------------------------------------------------------------------
-#  4. Plate validation & format fitting
-# ---------------------------------------------------------------------------
-
 class PlateValidator:
     def _fit_layout(self, text: str, layout: list):
-        """Coerce text into a layout. Returns (corrected, n_corrections) or None."""
         if len(text) != len(layout):
             return None
         out = []
@@ -460,7 +370,7 @@ class PlateValidator:
                     n_corr += 1
                 else:
                     return None
-            else:  # D
+            else:
                 if c.isdigit():
                     out.append(c)
                 elif c.upper() in LETTER_TO_DIGIT:
@@ -471,7 +381,6 @@ class PlateValidator:
         return "".join(out), n_corr
 
     def validate(self, raw_text: str) -> list:
-        """Return list of (corrected_plate, type, n_corrections) for all matching layouts."""
         cleaned = re.sub(r"[^A-Z0-9]", "", raw_text.upper())
         matches = []
         for type_name, layout, pattern, extra in PLATE_LAYOUTS:
@@ -487,30 +396,19 @@ class PlateValidator:
         return matches
 
 
-# ---------------------------------------------------------------------------
-#  5. Candidate scoring & selection
-# ---------------------------------------------------------------------------
-
 class PlateSelector:
     def __init__(self, validator: PlateValidator):
         self.validator = validator
 
     def _score(self, conf: float, plate_type: str, length: int, bonus: float) -> float:
         score = conf
-        score += 0.04 * length                           # longer matches are more informative
+        score += 0.04 * length
         score += 0.03 * FORMAT_PRIORITY.get(plate_type, 0)
-        score += bonus                                   # disambiguator override etc.
+        score += bonus
         return score
 
     def select(self, candidates: list, db=None):
-        """Pick the highest ranked valid candidate.
-
-        Ranking is lexicographic on (db_match, region_class, -n_corr, score):
-            1. plates registered in the DB always win
-            2. KKTC layouts outrank TR layouts (this system runs in TRNC)
-            3. fewer character corrections wins
-            4. ties broken by score (confidence, length, format priority, bonus)
-        """
+        # order: db match > kktc > less correction > score
         scored = []
         for cand in candidates:
             if len(cand) == 3:
@@ -541,10 +439,6 @@ class PlateSelector:
         (plate, ptype), (_rank, conf) = winner
         return plate, ptype, conf
 
-
-# ---------------------------------------------------------------------------
-#  6. Vehicle database (txt-backed)
-# ---------------------------------------------------------------------------
 
 class VehicleDatabase:
     def __init__(self, txt_path: str):
@@ -577,7 +471,16 @@ class VehicleDatabase:
 
     def register_vehicle(self, plate: str, owner_name: str):
         plate = self._normalize(plate)
+        # if last line has no newline we add one first, otherwise lines stick together
+        needs_newline = False
+        if os.path.exists(self.txt_path) and os.path.getsize(self.txt_path) > 0:
+            with open(self.txt_path, "rb") as f:
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    needs_newline = True
         with open(self.txt_path, "a", encoding="utf-8") as f:
+            if needs_newline:
+                f.write("\n")
             f.write(f"{plate},{owner_name}\n")
         print(f"\n[SUCCESS] Plate '{plate}' registered to '{owner_name}'.")
         self.reload()
@@ -603,10 +506,6 @@ class VehicleDatabase:
         return self.vehicles.get(self._normalize(plate))
 
 
-# ---------------------------------------------------------------------------
-#  7. Result logger
-# ---------------------------------------------------------------------------
-
 class ResultLogger:
     def __init__(self, txt_path: str):
         self.txt_path = txt_path
@@ -624,10 +523,6 @@ class ResultLogger:
         with open(self.txt_path, "a", encoding="utf-8") as f:
             f.write(line)
 
-
-# ---------------------------------------------------------------------------
-#  8. Main orchestrator
-# ---------------------------------------------------------------------------
 
 class PlateRecognizer:
     def __init__(self, db: "VehicleDatabase" = None):
@@ -661,8 +556,6 @@ class PlateRecognizer:
                 self.result_logger.log(result)
                 return result
 
-            # Use the upscaled grayscale variant for the visual disambiguator
-            # (its resolution matches the OCR bbox coordinates).
             gray_for_disambig = next((v for n, v in variants if n == "gray"), None)
             candidates = build_candidates(detections, gray_image=gray_for_disambig)
             plate, ptype, confidence = self.selector.select(candidates, db=self.db)
@@ -704,10 +597,6 @@ class PlateRecognizer:
         print("-" * 64)
 
 
-# ---------------------------------------------------------------------------
-#  9. Folder watcher & menu
-# ---------------------------------------------------------------------------
-
 def _is_image_file(filepath: str) -> bool:
     return Path(filepath).suffix.lower() in SUPPORTED_EXTENSIONS
 
@@ -729,13 +618,20 @@ def _wait_for_file_ready(filepath: str, timeout: float = 5.0):
     return os.path.exists(filepath)
 
 
-def _move_to_processed(filepath: str):
+def _move_to_processed(filepath: str, plate: str = ""):
     try:
-        dest = PROCESSED_DIR / os.path.basename(filepath)
-        original = dest
+        src = Path(filepath)
+        # if we read a plate use it as name, if not keep old name
+        if plate:
+            stem = re.sub(r"[^A-Z0-9]", "", plate.upper()) or src.stem
+        else:
+            stem = src.stem
+        suffix = src.suffix
+        dest = PROCESSED_DIR / f"{stem}{suffix}"
         counter = 1
+        # if same name already there add _1 _2 etc
         while dest.exists():
-            dest = PROCESSED_DIR / f"{original.stem}_{counter}{original.suffix}"
+            dest = PROCESSED_DIR / f"{stem}_{counter}{suffix}"
             counter += 1
         shutil.move(filepath, str(dest))
     except Exception as e:
@@ -755,8 +651,8 @@ class PlateFileHandler(FileSystemEventHandler):
             return
         logger.info(f"New image detected: {os.path.basename(filepath)}")
         _wait_for_file_ready(filepath)
-        self.recognizer.recognize(filepath)
-        _move_to_processed(filepath)
+        result = self.recognizer.recognize(filepath)
+        _move_to_processed(filepath, result.get("read_plate", ""))
 
 
 def process_existing_files(recognizer: PlateRecognizer):
@@ -771,8 +667,8 @@ def process_existing_files(recognizer: PlateRecognizer):
     print("=" * 64)
     for i, img_path in enumerate(image_files, 1):
         print(f"\n  [{i}/{len(image_files)}]", end="")
-        recognizer.recognize(str(img_path))
-        _move_to_processed(str(img_path))
+        result = recognizer.recognize(str(img_path))
+        _move_to_processed(str(img_path), result.get("read_plate", ""))
     return len(image_files)
 
 
